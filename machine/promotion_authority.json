@@ -1,0 +1,11 @@
+{
+  "schema": "glaciereq.promotion-authority-grant.v1",
+  "repository": "GlacierEQ/github-pr-authority-matrix",
+  "source_sha": "cc14ff0ecdfacf27c8e6269c86782a8a5a2f015a216c130ae8832baf674d98a5",
+  "proof_receipt_digest": "46b685e4afa5c6580a1257dfbf9320e4a656ae6794f68b6364ce11aca5fa593a",
+  "not_after": 1788948657.924036,
+  "mac": "8f27aba5cfcc9e86d3628a0bf2d48e6d0925c6aa08b809a340d1ed2dc2e0ca00",
+  "issuer": "local_operator_promotion_authority",
+  "verified": true,
+  "secret_ref": "src/promotion_authority.py::LOCAL_OPERATOR_SECRET"
+}

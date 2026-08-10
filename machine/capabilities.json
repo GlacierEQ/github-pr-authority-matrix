@@ -1,0 +1,12 @@
+{
+  "schema": "glaciereq.repo-capabilities.v1",
+  "repository": "GlacierEQ/github-pr-authority-matrix",
+  "capabilities": [
+    {
+      "id": "pr-authority-matrix",
+      "name": "PR Authority Matrix",
+      "status": "SCAFFOLD",
+      "module": "src/pr_authority_matrix.py"
+    }
+  ]
+}
