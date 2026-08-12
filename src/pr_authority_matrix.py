@@ -1,10 +1,4 @@
-"""PR action authority and dispatch engine.
-
-The matrix issues signed, short-lived grants; evaluates actor/repository/action
-constraints; records revocations; enforces merge preconditions; and dispatches
-allowed PR side effects through an executor. A small GitHub REST executor is
-included for common pull-request operations.
-"""
+"""Signed PR authority, revocation, and side-effect dispatch engine."""
 from __future__ import annotations
 
 import hashlib
@@ -18,12 +12,12 @@ from enum import Enum
 from typing import Any, Callable
 
 
-def _canonical(obj: object) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
 
 
-def _digest(obj: object) -> str:
-    return hashlib.sha256(_canonical(obj)).hexdigest()
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical(value)).hexdigest()
 
 
 class Decision(str, Enum):
@@ -92,13 +86,6 @@ class AuthorityGrant:
 
 @dataclass(frozen=True)
 class PrAuthorityMatrixRequest:
-    """Authorization request.
-
-    ``payload`` must include ``actor``, ``repository``, ``action``, ``grant``
-    and ``pr_number``. Optional ``context`` carries merge/protection state and
-    ``side_effect`` carries executor-specific data.
-    """
-
     subject_id: str
     payload: dict[str, Any] = field(default_factory=dict)
     budget: float = 1.0
@@ -136,7 +123,7 @@ class PrAuthorityMatrix:
     MIN_BUDGET = 0.0
     MAX_TTL_SECONDS = 24 * 60 * 60
 
-    def __init__(self, secret: bytes = b"local-development-authority-matrix-secret"):
+    def __init__(self, secret: bytes):
         if not secret:
             raise ValueError("secret_required")
         self._secret = bytes(secret)
@@ -196,11 +183,10 @@ class PrAuthorityMatrix:
     def revoke(self, grant_id: str, reason: str, *, now: float | None = None) -> dict[str, Any]:
         if not str(grant_id).strip():
             raise ValueError("grant_id_required")
-        at = time.time() if now is None else float(now)
         receipt = {
             "grant_id": str(grant_id),
             "reason": str(reason).strip() or "revoked",
-            "revoked_at": at,
+            "revoked_at": time.time() if now is None else float(now),
         }
         receipt["digest"] = _digest(receipt)
         self._revoked[str(grant_id)] = receipt
@@ -210,18 +196,9 @@ class PrAuthorityMatrix:
     def _highest_role(roles: tuple[str, ...]) -> int:
         return max((ROLE_RANK.get(role, -1) for role in roles), default=-1)
 
-    def _verify_grant(
-        self,
-        grant: AuthorityGrant,
-        *,
-        actor: str,
-        repository: str,
-        action: str,
-        now: float,
-    ) -> list[str]:
+    def _verify_grant(self, grant: AuthorityGrant, *, actor: str, repository: str, action: str, now: float) -> list[str]:
         failures: list[str] = []
-        expected = self._sign(grant.unsigned())
-        if not hmac.compare_digest(expected, grant.mac):
+        if not hmac.compare_digest(self._sign(grant.unsigned()), grant.mac):
             failures.append("grant_bad_mac")
         if grant.grant_id in self._revoked:
             failures.append("grant_revoked")
@@ -235,10 +212,10 @@ class PrAuthorityMatrix:
             failures.append("grant_repository_mismatch")
         if action not in grant.actions:
             failures.append("grant_action_not_allowed")
-        required_role = ACTION_MIN_ROLE.get(action)
-        if required_role is None:
+        required = ACTION_MIN_ROLE.get(action)
+        if required is None:
             failures.append("action_unknown")
-        elif self._highest_role(grant.roles) < ROLE_RANK[required_role]:
+        elif self._highest_role(grant.roles) < ROLE_RANK[required]:
             failures.append("grant_role_insufficient")
         return failures
 
@@ -275,11 +252,9 @@ class PrAuthorityMatrix:
             reasons.append("subject_id_missing")
         if req.budget <= self.MIN_BUDGET:
             reasons.append("budget_non_positive")
+        payload = req.payload if isinstance(req.payload, dict) else {}
         if not isinstance(req.payload, dict):
             reasons.append("payload_not_object")
-            payload: dict[str, Any] = {}
-        else:
-            payload = req.payload
 
         actor = str(payload.get("actor", "")).strip()
         repository = str(payload.get("repository", "")).strip()
@@ -324,7 +299,6 @@ class PrAuthorityMatrix:
         decision = Decision.REFUSE if reasons else Decision.ALLOW
         if not reasons:
             reasons = ["authority_verified"]
-
         body = {
             "schema": "glaciereq.pr-authority-matrix.v1",
             "subject_id": req.subject_id,
@@ -360,31 +334,39 @@ class PrAuthorityMatrix:
         *,
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Authorize first, then execute exactly one requested side effect."""
-        receipt = self.evaluate(req, now=now)
-        result: Any = None
+        """Authorize first and return a structured receipt for execution success or failure."""
+        authority = self.evaluate(req, now=now)
+        attempted = False
         executed = False
-        if receipt.decision is Decision.ALLOW:
+        result: Any = None
+        error: dict[str, str] | None = None
+        if authority.decision is Decision.ALLOW:
+            attempted = True
             payload = req.payload
-            result = executor(
-                str(payload["action"]).lower(),
-                str(payload["repository"]),
-                int(payload["pr_number"]),
-                dict(payload.get("side_effect", {})),
-            )
-            executed = True
+            try:
+                result = executor(
+                    str(payload["action"]).lower(),
+                    str(payload["repository"]),
+                    int(payload["pr_number"]),
+                    dict(payload.get("side_effect", {})),
+                )
+                executed = True
+            except Exception as exc:
+                error = {"type": type(exc).__name__, "message": str(exc)[:500]}
+
         dispatch_receipt = {
-            "authority": receipt.as_dict(),
+            "authority": authority.as_dict(),
+            "attempted": attempted,
             "executed": executed,
+            "outcome": "EXECUTED" if executed else ("EXECUTOR_ERROR" if attempted else "REFUSED"),
             "result": result,
+            "error": error,
         }
         dispatch_receipt["digest"] = _digest(dispatch_receipt)
         return dispatch_receipt
 
 
 class RecordingExecutor:
-    """Small real executor for local tests/examples: records requested effects."""
-
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
@@ -395,12 +377,7 @@ class RecordingExecutor:
 
 
 class GitHubRestExecutor:
-    """GitHub REST side-effect executor for common pull-request actions.
-
-    Force-push is intentionally not implemented here. The matrix can decide
-    whether it is authorized, but raw ref mutation belongs behind a separate
-    explicit executor boundary.
-    """
+    """GitHub REST executor for normal PR operations; raw force-push is separate."""
 
     def __init__(self, token: str, api_root: str = "https://api.github.com") -> None:
         if not str(token).strip():
@@ -425,9 +402,11 @@ class GitHubRestExecutor:
             with urllib.request.urlopen(request, timeout=30) as response:
                 raw = response.read()
                 return json.loads(raw.decode("utf-8")) if raw else {"ok": True, "status": response.status}
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"github_http_{error.code}: {detail[:500]}") from error
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"github_http_{exc.code}: {detail[:500]}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"github_transport_error: {exc.reason}") from exc
 
     def __call__(self, action: str, repository: str, pr_number: int, data: dict[str, Any]) -> dict[str, Any]:
         repo_path = "/repos/" + repository
@@ -446,15 +425,9 @@ class GitHubRestExecutor:
             teams = data.get("team_reviewers", [])
             if not reviewers and not teams:
                 raise ValueError("reviewer_required")
-            return self._request(
-                "POST",
-                f"{repo_path}/pulls/{pr_number}/requested_reviewers",
-                {"reviewers": reviewers, "team_reviewers": teams},
-            )
+            return self._request("POST", f"{repo_path}/pulls/{pr_number}/requested_reviewers", {"reviewers": reviewers, "team_reviewers": teams})
         if action == Action.UPDATE_BRANCH.value:
-            body = {}
-            if data.get("expected_head_sha"):
-                body["expected_head_sha"] = str(data["expected_head_sha"])
+            body = {"expected_head_sha": str(data["expected_head_sha"])} if data.get("expected_head_sha") else {}
             return self._request("PUT", f"{repo_path}/pulls/{pr_number}/update-branch", body)
         if action == Action.MERGE.value:
             body = {k: data[k] for k in ("commit_title", "commit_message", "sha", "merge_method") if data.get(k) is not None}
