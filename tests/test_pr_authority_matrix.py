@@ -45,6 +45,15 @@ def _request(grant, *, action="label", context=None, side_effect=None, repositor
     )
 
 
+def test_secret_is_required() -> None:
+    try:
+        PrAuthorityMatrix(b"")
+    except ValueError as error:
+        assert str(error) == "secret_required"
+    else:
+        raise AssertionError("empty secret accepted")
+
+
 def test_signed_grant_allows_authorized_label() -> None:
     matrix = _matrix()
     grant = _grant(matrix)
@@ -113,7 +122,9 @@ def test_dispatch_calls_executor_only_after_allow() -> None:
         now=NOW + 10,
     )
 
+    assert result["attempted"] is True
     assert result["executed"] is True
+    assert result["outcome"] == "EXECUTED"
     assert result["result"]["ok"] is True
     assert executor.calls == [
         {
@@ -131,9 +142,27 @@ def test_refused_dispatch_never_calls_executor() -> None:
     executor = RecordingExecutor()
     result = matrix.dispatch(_request(grant), executor, now=NOW + 2)
 
+    assert result["attempted"] is False
     assert result["executed"] is False
+    assert result["outcome"] == "REFUSED"
     assert executor.calls == []
     assert result["authority"]["decision"] == "REFUSE"
+
+
+def test_executor_error_becomes_structured_failure() -> None:
+    matrix = _matrix()
+    grant = _grant(matrix)
+
+    def failing_executor(action, repository, pr_number, data):
+        raise RuntimeError("remote unavailable")
+
+    result = matrix.dispatch(_request(grant), failing_executor, now=NOW + 10)
+
+    assert result["attempted"] is True
+    assert result["executed"] is False
+    assert result["outcome"] == "EXECUTOR_ERROR"
+    assert result["error"] == {"type": "RuntimeError", "message": "remote unavailable"}
+    assert len(result["digest"]) == 64
 
 
 def test_insufficient_role_refuses_merge() -> None:
