@@ -1,50 +1,86 @@
 # PR Authority Matrix
 
-Independent GlacierEQ portfolio exhibit aligned to **GitHub** operating themes.
+Independent GlacierEQ portfolio implementation aligned to public GitHub operating themes. This repository is not affiliated with or endorsed by GitHub.
 
-> **Not affiliated.** This repository is not affiliated with, endorsed by, employed by, or deployed at GitHub.
-> No proprietary access, production deployment, customer impact, or company partnership is claimed.
+## Purpose
 
-## Bottleneck (GlacierEQ hypothesis)
+Prevent automated or human pull-request side effects from bypassing explicit authority.
 
-Bot and human PR actions blur who may merge, label, or force-push under policy.
+The matrix now implements the operational path the original repository only described:
 
-**Brick wall:** Silent success without receipts; affiliation or production claims without evidence.
+1. issue a signed, short-lived grant bound to an actor, repository, roles, and allowed actions;
+2. evaluate the requested PR action against the grant and runtime context;
+3. refuse expired, revoked, tampered, borrowed, cross-repository, under-privileged, or ungranted authority;
+4. enforce merge and protected-branch preconditions;
+5. emit a deterministic decision receipt;
+6. execute the side effect only after authorization.
 
-**Observed public pressure (snapshot hypothesis):** Public market pressure toward AI-enabled products and operators (hypothesis only).
+## Supported actions
 
-## Innovation mechanism
+The authority model understands:
 
-**PR Authority Matrix** — Dispatch PR side-effects only through an authority matrix with grant TTL and revoke receipts.
+- `label`
+- `comment`
+- `request_review`
+- `update_branch`
+- `merge`
+- `force_push`
 
-## Target roles
+The built-in GitHub REST executor implements the first five. `force_push` is intentionally left behind a separate executor boundary because raw ref mutation is materially different from normal PR operations; the matrix still evaluates whether such an action is authorized and whether protected-branch conditions permit it.
 
-- Applied AI Systems Engineer
-- Forward-Deployed Engineer
+## Grant model
 
-## Application move
+A grant is HMAC-signed and contains:
 
-Lead with a small, inspectable PR Authority Matrix exhibit and explicit non-affiliation boundary.
+- grant id
+- actor
+- repository (or `*`)
+- roles
+- allowed actions
+- issue time
+- expiry time
 
-## Current scaffold state
+The engine supports explicit revocation receipts and rejects altered MACs.
 
-This leaf is a **scaffold**: contracts, tests, and a stub mechanism exist so another engineer/AI can fill production-grade code without inventing company affiliation.
+Role ordering is:
 
-| Surface | Path |
-|---------|------|
-| Mechanism stub | `src/pr_authority_matrix.py` |
-| Operate entry | `scripts/operate.py` |
-| Contract tests | `tests/` |
-| Target contract | `machine/target-contract.json` |
-| **AI fill-in brief** | **`DEV_UP_INSTRUCTIONS.md`** |
-| Issue contract | `ISSUE_CONTRACT.md` |
+`read < triage < write < maintain < admin`
 
-## Non-claims
+Action requirements are explicit in code. For example, merge requires `maintain`; force-push requires `admin`.
 
-- No GitHub employment, endorsement, proprietary data, or production use
-- No customer, revenue, latency, or scale claims without separate receipts
-- Scaffold tests define **intended behavior**, not verified production excellence
+## Merge safety
 
-## Next gate
+A merge authorization also requires runtime context proving:
 
-Implement mechanism + positive tests + operate receipt.
+- the PR is not draft
+- required checks passed
+- required approvals are present
+- the PR is not explicitly unmergeable
+
+These are runtime invariants, not documentation gates.
+
+## Run it
+
+```bash
+python scripts/operate.py
+```
+
+The command issues a demo grant, authorizes a label action, dispatches it through a recording executor, and prints the complete dispatch receipt.
+
+## Real GitHub execution
+
+`GitHubRestExecutor` uses GitHub's REST API and a caller-provided token. It supports labels, comments, reviewer requests, branch updates, and merges. No token is stored in the repository.
+
+Typical application code constructs the matrix with its own secret, evaluates or dispatches a request, and provides a GitHub executor only at the actual side-effect boundary.
+
+## Verify behavior
+
+```bash
+python -m pytest -q
+```
+
+Tests cover grant signing, expiry, revocation, actor/repository/action binding, role insufficiency, merge preconditions, dispatch refusal, protected-branch force-push policy, GitHub endpoint routing, and adversarial grant tampering.
+
+## Current boundary
+
+This is an operational authorization and dispatch library. It is not a GitHub App installation, hosted service, or claim of production deployment. Deployment belongs in the consuming control plane that owns secrets, repositories, and runtime identity.
